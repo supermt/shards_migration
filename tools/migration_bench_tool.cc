@@ -16,15 +16,15 @@
 #include <unistd.h>
 #endif
 #include <fcntl.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <sys/types.h>
 
 #include <atomic>
 #include <cinttypes>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -93,9 +93,13 @@ using GFLAGS_NAMESPACE::SetUsageMessage;
 DEFINE_string(ycsb_workload, "", "The workload of YCSB");
 DEFINE_int64(load_num, 100000, "Num of operations in loading phrase");
 DEFINE_int64(running_num, 100000, "Num of operations in running phrase");
+DEFINE_int64(keyrange_num, 5, "Number of Keyranges");
 
 DEFINE_string(
     benchmarks,
+    "ycsb,"
+    "ycsb_load,"
+    "ycsb_run,"
     "ycsb_src,"
     "ycsb_dst,"
     "ycsb_migrate_src,"
@@ -2012,6 +2016,137 @@ class Duration {
   uint64_t start_at_;
 };
 
+struct KeyrangeUnit {
+  int64_t keyrange_start;
+  int64_t keyrange_access;
+  int64_t keyrange_keys;
+};
+
+class GenerateTwoTermExpKeys {
+ public:
+  int64_t keyrange_rand_max_;
+  int64_t keyrange_size_;
+  int64_t keyrange_num_;
+  bool initiated_;
+  std::vector<KeyrangeUnit> keyrange_set_;
+
+  GenerateTwoTermExpKeys() {
+    keyrange_rand_max_ = FLAGS_num;
+    initiated_ = false;
+  }
+
+  ~GenerateTwoTermExpKeys() {}
+
+  // Initiate the KeyrangeUnit vector and calculate the size of each
+  // KeyrangeUnit.
+  Status InitiateExpDistribution(int64_t total_keys, double prefix_a,
+                                 double prefix_b, double prefix_c,
+                                 double prefix_d) {
+    int64_t amplify = 0;
+    int64_t keyrange_start = 0;
+    initiated_ = true;
+    if (FLAGS_keyrange_num <= 0) {
+      keyrange_num_ = 1;
+    } else {
+      keyrange_num_ = FLAGS_keyrange_num;
+    }
+    keyrange_size_ = total_keys / keyrange_num_;
+
+    // Calculate the key-range shares size based on the input parameters
+    for (int64_t pfx = keyrange_num_; pfx >= 1; pfx--) {
+      // Step 1. Calculate the probability that this key range will be
+      // accessed in a query. It is based on the two-term expoential
+      // distribution
+      double keyrange_p = prefix_a * std::exp(prefix_b * pfx) +
+                          prefix_c * std::exp(prefix_d * pfx);
+      if (keyrange_p < std::pow(10.0, -16.0)) {
+        keyrange_p = 0.0;
+      }
+      // Step 2. Calculate the amplify
+      // In order to allocate a query to a key-range based on the random
+      // number generated for this query, we need to extend the probability
+      // of each key range from [0,1] to [0, amplify]. Amplify is calculated
+      // by 1/(smallest key-range probability). In this way, we ensure that
+      // all key-ranges are assigned with an Integer that  >=0
+      if (amplify == 0 && keyrange_p > 0) {
+        amplify = static_cast<int64_t>(std::floor(1 / keyrange_p)) + 1;
+      }
+
+      // Step 3. For each key-range, we calculate its position in the
+      // [0, amplify] range, including the start, the size (keyrange_access)
+      KeyrangeUnit p_unit;
+      p_unit.keyrange_start = keyrange_start;
+      if (0.0 >= keyrange_p) {
+        p_unit.keyrange_access = 0;
+      } else {
+        p_unit.keyrange_access =
+            static_cast<int64_t>(std::floor(amplify * keyrange_p));
+      }
+      p_unit.keyrange_keys = keyrange_size_;
+      keyrange_set_.push_back(p_unit);
+      keyrange_start += p_unit.keyrange_access;
+    }
+    keyrange_rand_max_ = keyrange_start;
+
+    // Step 4. Shuffle the key-ranges randomly
+    // Since the access probability is calculated from small to large,
+    // If we do not re-allocate them, hot key-ranges are always at the end
+    // and cold key-ranges are at the begin of the key space. Therefore, the
+    // key-ranges are shuffled and the rand seed is only decide by the
+    // key-range hotness distribution. With the same distribution parameters
+    // the shuffle results are the same.
+    Random64 rand_loca(keyrange_rand_max_);
+    for (int64_t i = 0; i < FLAGS_keyrange_num; i++) {
+      int64_t pos = rand_loca.Next() % FLAGS_keyrange_num;
+      assert(i >= 0 && i < static_cast<int64_t>(keyrange_set_.size()) &&
+             pos >= 0 && pos < static_cast<int64_t>(keyrange_set_.size()));
+      std::swap(keyrange_set_[i], keyrange_set_[pos]);
+    }
+
+    // Step 5. Recalculate the prefix start postion after shuffling
+    int64_t offset = 0;
+    for (auto& p_unit : keyrange_set_) {
+      p_unit.keyrange_start = offset;
+      offset += p_unit.keyrange_access;
+    }
+
+    return Status::OK();
+  }
+
+  // Generate the Key ID according to the input ini_rand and key
+  // distribution
+  int64_t DistGetKeyID(int64_t ini_rand, double key_dist_a, double key_dist_b) {
+    int64_t keyrange_rand = ini_rand % keyrange_rand_max_;
+
+    // Calculate and select one key-range that contains the new key
+    int64_t start = 0, end = static_cast<int64_t>(keyrange_set_.size());
+    while (start + 1 < end) {
+      int64_t mid = start + (end - start) / 2;
+      assert(mid >= 0 && mid < static_cast<int64_t>(keyrange_set_.size()));
+      if (keyrange_rand < keyrange_set_[mid].keyrange_start) {
+        end = mid;
+      } else {
+        start = mid;
+      }
+    }
+    int64_t keyrange_id = start;
+
+    // Select one key in the key-range and compose the keyID
+    int64_t key_offset = 0, key_seed;
+    if (key_dist_a == 0.0 || key_dist_b == 0.0) {
+      key_offset = ini_rand % keyrange_size_;
+    } else {
+      double u =
+          static_cast<double>(ini_rand % keyrange_size_) / keyrange_size_;
+      key_seed = static_cast<int64_t>(
+          ceil(std::pow((u / key_dist_a), (1 / key_dist_b))));
+      Random64 rand_key(key_seed);
+      key_offset = rand_key.Next() % keyrange_size_;
+    }
+    return keyrange_size_ * keyrange_id + key_offset;
+  }
+};
+
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
@@ -2630,8 +2765,16 @@ class Benchmark {
         fresh_db = true;
         method = &Benchmark::YCSBLoader;
       } else if (name == "ycsb_run") {
+        // plain running
         fresh_db = false;
         method = &Benchmark::YCSBRunner;
+      } else if (name == "ycsb_iterate_migrate_src") {
+        fresh_db = false;
+        num_threads++;
+        method = &Benchmark::YCSB_Run_And_Iterate;
+      } else if (name == "ycsb_iterate_migrate_dst") {
+        num_threads++;
+        method = &Benchmark::YCSB_Run_With_Loading;
       } else if (name == "stats") {
         PrintStats("rocksdb.stats");
       } else if (name == "resetstats") {
@@ -3781,6 +3924,23 @@ class Benchmark {
     YCSBWorking(thread, &wl, false, true);
   }
 
+  void YCSB_Run_And_Iterate(ThreadState* thread) {
+    if (thread->tid > 0) {
+      YCSBRunner(thread);
+    } else {
+      struct KeyrangeUnit migration_range = {1, 1, 1};
+      BGIterateKeyrange(thread, &migration_range);
+    }
+  }
+
+  void YCSB_Run_With_Loading(ThreadState* thread) {
+    if (thread->tid > 0) {
+    } else {
+      struct KeyrangeUnit migration_range = {1, 1, 1};
+      BGInsertKeyrange(thread, &migration_range);
+    }
+  }
+
   void YCSBIntegrate(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
@@ -4207,6 +4367,18 @@ class Benchmark {
     } else {
       BGWriter(thread, kWrite);
     }
+  }
+
+  void BGIterateKeyrange(ThreadState* thread,
+                         struct KeyrangeUnit* migration_range) {
+    // this will be similar to the
+    // TODO: find out how to iterate a key range later
+  }
+
+  void BGInsertKeyrange(ThreadState* thread,
+                        struct KeyrangeUnit* migration_range) {
+    // this will be similar to the
+    // TODO: find out how to iterate a key range later
   }
 
   void BGWriter(ThreadState* thread, enum OperationType write_merge) {
