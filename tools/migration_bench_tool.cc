@@ -103,11 +103,10 @@ DEFINE_int64(migrate_keys, 10000, "The start key of migration point");
 
 DEFINE_string(
     benchmarks,
-    "integrate,"
-    "load,"
-    "run,"
-    "iterate_migrate_src,"
-    "iterate_migrate_dst,",
+    "src_load,"
+    "src_run,"
+    "dst_load,"
+    "dst_run,",
 
     "This is a single machine test for the shards migration."
     "All system runs at the same logic: run the ycsb filling first, "
@@ -2874,13 +2873,21 @@ class Benchmark {
         // plain running
         fresh_db = false;
         method = &Benchmark::RangedRunner;
-      } else if (name == "iterate_migrate_src") {
+      } else if (name == "src_load") {
+        fresh_db = true;
+        num_threads++;
+        method = &Benchmark::Ranged_Load_With_Insert;
+      } else if (name == "dst_load") {
+        fresh_db = true;
+        method = &Benchmark::RangedLoader;
+      } else if (name == "src_run") {
         fresh_db = false;
         num_threads++;
-        method = &Benchmark::YCSB_Run_And_Iterate;
-      } else if (name == "iterate_migrate_dst") {
+        method = &Benchmark::Ranged_Run_And_Iterate;
+      } else if (name == "dst_run") {
+        fresh_db = false;
         num_threads++;
-        method = &Benchmark::YCSB_Run_With_Loading;
+        method = &Benchmark::Ranged_Run_With_Loading;
       } else if (name == "stats") {
         PrintStats("rocksdb.stats");
       } else if (name == "resetstats") {
@@ -4153,6 +4160,7 @@ class Benchmark {
       thread->stats.AddBytes(bytes);
     }
   }
+
   void RangedLoader(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
@@ -4167,22 +4175,36 @@ class Benchmark {
       // initialize each range
       key_gen.AddKeyRange(start, FLAGS_keyrange_size, keys_in_each_range);
     }
-    if (FLAGS_migrate_from < i * FLAGS_keyrange_size + FLAGS_keyrange_start) {
-      FLAGS_migrate_from = i * FLAGS_keyrange_size + FLAGS_keyrange_start + 5;
-    }
-    KeyrangeUnit migration_target(FLAGS_migrate_from, FLAGS_migrate_range,
-                                  FLAGS_migrate_keys);
-    key_gen.SpecifyMigrateCandidate(migration_target, true);
     key_gen.InitGenerator();
     RangedWorking(thread, &wl, true, false, &key_gen);
   }
+
   void RangedRunner(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
     InitWorkload(wl, props);
     RangedKeysGenerator key_gen;
-
+    int64_t keys_in_each_range = FLAGS_load_num / FLAGS_keyrange_num;
+    // the key range must be larger than the keys inside
+    assert(keys_in_each_range < FLAGS_keyrange_size);
+    int64_t start = FLAGS_keyrange_start;
+    int i = 0;
+    for (i = 0; i < FLAGS_keyrange_num; i++) {
+      // initialize each range
+      key_gen.AddKeyRange(start, FLAGS_keyrange_size, keys_in_each_range);
+    }
+    key_gen.InitGenerator();
     RangedWorking(thread, &wl, false, true, &key_gen);
+  }
+
+  void Ranged_Load_With_Insert(ThreadState* thread) {
+    if (thread->tid > 0) {
+      RangedLoader(thread);
+    } else {
+      KeyrangeUnit migration_range = {FLAGS_migrate_from, FLAGS_migrate_range,
+                                      FLAGS_migrate_keys};
+      BGInsertKeyrange(thread, &migration_range);
+    }
   }
 
   void Ranged_Run_And_Iterate(ThreadState* thread) {
@@ -4204,6 +4226,7 @@ class Benchmark {
       BGInsertKeyrange(thread, &migration_range);
     }
   }
+
   void YCSBLoader(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
