@@ -4664,13 +4664,88 @@ class Benchmark {
   }
 
   void BGIterateKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
-    // this will be similar to the
-    // TODO: find out how to iterate a key range later
+    // this will be similar to BGScan
+    if (FLAGS_num_multi_db > 0) {
+      fprintf(stderr, "Not supporting multiple DBs.\n");
+      abort();
+    }
+    assert(db_.db != nullptr);
+    // we only scan for once
+    reads_ = FLAGS_migrate_keys;
+    fprintf(stderr, "num reads to do %" PRIu64 "\n", reads_);
+    Duration duration(FLAGS_duration, reads_);
+    uint64_t num_seek_to_first = 0;
+    uint64_t num_next = 0;
+    // we need to first seek to the begin
+
+    ReadOptions read_options;
+    Iterator* iter = db_.db->NewIterator(read_options);
+    Slice seek_start;
+    GenerateKeyFromInt(FLAGS_migrate_from, FLAGS_num, &seek_start);
+    iter->Seek(seek_start);
+
+    while (!duration.Done(1)) {
+      if (!iter->Valid()) {
+        iter->Seek(seek_start);
+        num_seek_to_first++;
+      } else if (!iter->status().ok()) {
+        fprintf(stderr, "Iterator error: %s\n",
+                iter->status().ToString().c_str());
+        abort();
+      } else {
+        iter->Next();
+        num_next++;
+      }
+      thread->stats.FinishedOps(&db_, db_.db, 1, kSeek);
+    }
+    delete iter;
   }
 
   void BGInsertKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
     // this will be similar to the
-    // TODO: find out how to iterate a key range later
+    RangedKeysGenerator key_gen;
+    key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
+                        FLAGS_migrate_keys);
+    Duration duration(FLAGS_duration, FLAGS_migrate_keys);
+    key_gen.InitGenerator();
+    int64_t ini_rand = 0;
+    rocksdb::WriteOptions w_op;
+    uint64_t bytes = 0;
+    int stage = 0;
+    RandomGenerator gen;
+    while (!duration.Done(1)) {
+      DB* db = SelectDB(thread);
+      if (duration.GetStage() != stage) {
+        stage = duration.GetStage();
+        if (db_.db != nullptr) {
+          db_.CreateNewCf(open_options_, stage);
+        } else {
+          for (auto& input_db : multi_dbs_) {
+            input_db.CreateNewCf(open_options_, stage);
+          }
+        }
+      }
+      Slice key;
+      ini_rand = GetRandomKey(&thread->rand);
+      int64_t key_value = key_gen.GenerateKeys(ini_rand);
+      GenerateKeyFromInt(key_value, FLAGS_num, &key);
+      Slice val = gen.Generate(value_size_);
+      db_.db->Put(w_op, key, val);
+
+      int64_t batch_bytes = 0;
+      for (int64_t j = 0; j < entries_per_batch_; j++) {
+        batch_bytes += val.size() + key.size();
+        bytes += val.size() + key.size();
+      }
+      if (thread->shared->write_rate_limiter.get() != nullptr) {
+        thread->shared->write_rate_limiter->Request(
+            batch_bytes, Env::IO_HIGH, nullptr /* stats */,
+            RateLimiter::OpType::kWrite);
+        thread->stats.ResetLastOpTime();
+      }
+      thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kWrite);
+    }
+    thread->stats.AddBytes(bytes);
   }
 
   void BGWriter(ThreadState* thread, enum OperationType write_merge) {
