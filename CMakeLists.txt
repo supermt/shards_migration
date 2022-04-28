@@ -622,6 +622,7 @@ set(SOURCES
         test_util/transaction_test_util.cc
         tools/block_cache_analyzer/block_cache_trace_analyzer.cc
         tools/db_bench_tool.cc
+        tools/migration_bench_tool.cc
         tools/dump/db_dump_tool.cc
         tools/ldb_cmd.cc
         tools/ldb_tool.cc
@@ -1044,6 +1045,7 @@ if(WITH_TESTS)
     memtable/memtablerep_bench.cc
     db/range_del_aggregator_bench.cc
     tools/db_bench.cc
+    tools/migration_bench.cc
     table/table_reader_bench.cc
     utilities/persistent_cache/hash_table_bench.cc)
   add_library(testharness OBJECT test_util/testharness.cc)

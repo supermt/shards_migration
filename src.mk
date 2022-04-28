@@ -264,6 +264,9 @@ MOCK_LIB_SOURCES =                                              \
 BENCH_LIB_SOURCES =                                             \
   tools/db_bench_tool.cc                                        \
 
+MIGRATION_LIB_SOURCES =												\
+  tools/migration_bench_tool.cc
+
 TEST_LIB_SOURCES =                                              \
   db/db_test_util.cc                                            \
   test_util/testharness.cc                                      \
@@ -394,6 +397,7 @@ MAIN_SOURCES =                                                          \
   tools/block_cache_analyzer/block_cache_trace_analyzer_tool.cc         \
   tools/db_bench.cc                                                     \
   tools/db_bench_tool_test.cc                                           \
+  tools/migration_bench.cc												\
   tools/db_sanity_test.cc                                               \
   tools/ldb_cmd_test.cc                                                 \
   tools/reduce_levels_test.cc                                           \

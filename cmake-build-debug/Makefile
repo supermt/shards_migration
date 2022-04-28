@@ -276,6 +276,19 @@ db_bench/fast:
 .PHONY : db_bench/fast
 
 #=============================================================================
+# Target rules for targets named migration_bench
+
+# Build rule for target.
+migration_bench: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 migration_bench
+.PHONY : migration_bench
+
+# fast build rule for target.
+migration_bench/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/migration_bench.dir/build.make CMakeFiles/migration_bench.dir/build
+.PHONY : migration_bench/fast
+
+#=============================================================================
 # Target rules for targets named table_reader_bench
 
 # Build rule for target.
@@ -9327,6 +9340,57 @@ tools/ldb_tool.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb.dir/build.make CMakeFiles/rocksdb.dir/tools/ldb_tool.cc.s
 .PHONY : tools/ldb_tool.cc.s
 
+tools/migration_bench.o: tools/migration_bench.cc.o
+.PHONY : tools/migration_bench.o
+
+# target to build an object file
+tools/migration_bench.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/migration_bench.dir/build.make CMakeFiles/migration_bench.dir/tools/migration_bench.cc.o
+.PHONY : tools/migration_bench.cc.o
+
+tools/migration_bench.i: tools/migration_bench.cc.i
+.PHONY : tools/migration_bench.i
+
+# target to preprocess a source file
+tools/migration_bench.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/migration_bench.dir/build.make CMakeFiles/migration_bench.dir/tools/migration_bench.cc.i
+.PHONY : tools/migration_bench.cc.i
+
+tools/migration_bench.s: tools/migration_bench.cc.s
+.PHONY : tools/migration_bench.s
+
+# target to generate assembly for a file
+tools/migration_bench.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/migration_bench.dir/build.make CMakeFiles/migration_bench.dir/tools/migration_bench.cc.s
+.PHONY : tools/migration_bench.cc.s
+
+tools/migration_bench_tool.o: tools/migration_bench_tool.cc.o
+.PHONY : tools/migration_bench_tool.o
+
+# target to build an object file
+tools/migration_bench_tool.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb-shared.dir/build.make CMakeFiles/rocksdb-shared.dir/tools/migration_bench_tool.cc.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb.dir/build.make CMakeFiles/rocksdb.dir/tools/migration_bench_tool.cc.o
+.PHONY : tools/migration_bench_tool.cc.o
+
+tools/migration_bench_tool.i: tools/migration_bench_tool.cc.i
+.PHONY : tools/migration_bench_tool.i
+
+# target to preprocess a source file
+tools/migration_bench_tool.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb-shared.dir/build.make CMakeFiles/rocksdb-shared.dir/tools/migration_bench_tool.cc.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb.dir/build.make CMakeFiles/rocksdb.dir/tools/migration_bench_tool.cc.i
+.PHONY : tools/migration_bench_tool.cc.i
+
+tools/migration_bench_tool.s: tools/migration_bench_tool.cc.s
+.PHONY : tools/migration_bench_tool.s
+
+# target to generate assembly for a file
+tools/migration_bench_tool.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb-shared.dir/build.make CMakeFiles/rocksdb-shared.dir/tools/migration_bench_tool.cc.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/rocksdb.dir/build.make CMakeFiles/rocksdb.dir/tools/migration_bench_tool.cc.s
+.PHONY : tools/migration_bench_tool.cc.s
+
 tools/reduce_levels_test.o: tools/reduce_levels_test.cc.o
 .PHONY : tools/reduce_levels_test.o
 
@@ -12681,6 +12745,7 @@ help:
 	@echo "... hash_table_bench"
 	@echo "... ldb"
 	@echo "... memtablerep_bench"
+	@echo "... migration_bench"
 	@echo "... range_del_aggregator_bench"
 	@echo "... rocksdb"
 	@echo "... rocksdb-shared"
@@ -13648,6 +13713,12 @@ help:
 	@echo "... tools/ldb_tool.o"
 	@echo "... tools/ldb_tool.i"
 	@echo "... tools/ldb_tool.s"
+	@echo "... tools/migration_bench.o"
+	@echo "... tools/migration_bench.i"
+	@echo "... tools/migration_bench.s"
+	@echo "... tools/migration_bench_tool.o"
+	@echo "... tools/migration_bench_tool.i"
+	@echo "... tools/migration_bench_tool.s"
 	@echo "... tools/reduce_levels_test.o"
 	@echo "... tools/reduce_levels_test.i"
 	@echo "... tools/reduce_levels_test.s"
