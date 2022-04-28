@@ -94,16 +94,20 @@ DEFINE_string(ycsb_workload, "", "The workload of YCSB");
 DEFINE_int64(load_num, 100000, "Num of operations in loading phrase");
 DEFINE_int64(running_num, 100000, "Num of operations in running phrase");
 DEFINE_int64(keyrange_num, 5, "Number of Keyranges");
+DEFINE_int64(keyrange_start, 1000000, "Number of Keyranges");
+DEFINE_int64(keyrange_size, 1000000, "Number of Keyranges");
+DEFINE_bool(insert_while_migration, false, "");
+DEFINE_int64(migrate_from, 1000000, "The start key of migration point");
+DEFINE_int64(migrate_range, 1000000, "The start key of migration point");
+DEFINE_int64(migrate_keys, 10000, "The start key of migration point");
 
 DEFINE_string(
     benchmarks,
-    "ycsb,"
-    "ycsb_load,"
-    "ycsb_run,"
-    "ycsb_src,"
-    "ycsb_dst,"
-    "ycsb_migrate_src,"
-    "ycsb_migrate_dst,",
+    "integrate,"
+    "load,"
+    "run,"
+    "iterate_migrate_src,"
+    "iterate_migrate_dst,",
 
     "This is a single machine test for the shards migration."
     "All system runs at the same logic: run the ycsb filling first, "
@@ -2016,10 +2020,115 @@ class Duration {
   uint64_t start_at_;
 };
 
-struct KeyrangeUnit {
+class KeyrangeUnit {
+ public:
   int64_t keyrange_start;
   int64_t keyrange_access;
   int64_t keyrange_keys;
+
+  KeyrangeUnit() : keyrange_start(0), keyrange_access(0), keyrange_keys(0) {}
+  KeyrangeUnit(int64_t start, int64_t access, int64_t keys)
+      : keyrange_start(start), keyrange_access(access), keyrange_keys(keys) {}
+
+  bool isIn(int64_t key) {
+    return ((key > keyrange_start) && (key < keyrange_start + keyrange_access));
+  }
+};
+bool compareKeyrange(KeyrangeUnit i1, KeyrangeUnit i2) {
+  return (i1.keyrange_start > i2.keyrange_start);
+}
+
+class RangedKeysGenerator {
+ private:
+  std::vector<KeyrangeUnit> op_key_range_;
+  KeyrangeUnit migrate_key_range_;
+  int64_t key_value_max_ = 0;
+  int64_t key_value_min_ = 0;
+  bool initialized = false;
+
+ public:
+  static Status GenerateOneKeyRange(KeyrangeUnit* target, int64_t start,
+                                    int64_t end, int64_t num_of_keys) {
+    target->keyrange_start = start;
+    target->keyrange_access = end - start;
+    target->keyrange_keys = num_of_keys;
+  }
+
+  // TODO: discussion, the keys in the migrated range, should we insert into dst
+  //  before or after the migration.
+  Status AddKeyRange(int64_t start, int64_t access, int64_t keys) {
+    this->op_key_range_.emplace_back(start, access, keys);
+  }
+  Status AddKeyRange(KeyrangeUnit& new_input) {
+    this->op_key_range_.emplace_back(new_input);
+  }
+
+  Status SpecifyMigrateCandidate(KeyrangeUnit& migration_target,
+                                 bool add_to_generator) {
+    migrate_key_range_ = migration_target;
+    if (add_to_generator) {
+      AddKeyRange(migrate_key_range_);
+    }
+    return Status::OK();
+  }
+
+  Status InitGenerator() {
+    initialized = false;
+    std::sort(this->op_key_range_.begin(), this->op_key_range_.end(),
+              compareKeyrange);
+    key_value_max_ = op_key_range_.end()->keyrange_start +
+                     op_key_range_.end()->keyrange_access;
+
+    key_value_min_ = op_key_range_.begin()->keyrange_start;
+
+    initialized = true;
+    return Status::OK();
+  }
+
+  int64_t GenerateKeys(int64_t ini_rand) {
+    // transform the random number into a number with prefix
+    // first, it should be in the target range
+    int64_t keyrange_rand =
+        key_value_min_ + (ini_rand % (key_value_max_ - key_value_min_));
+    // next, find the keyrange it belongs
+    //    int64_t keyrange_id = 0;
+    //    int nearest = 0;
+    //    int last_max = key_value_min_;
+    //    for (auto& range_unit : op_key_range_) {
+    //      if (range_unit.isIn(keyrange_rand)) {
+    //        break;
+    //      }
+    //      last_max = range_unit.keyrange_start + range_unit.keyrange_access;
+    //      if (keyrange_rand - last_max <
+    //          range_unit.keyrange_start - keyrange_rand) {
+    //        nearest = keyrange_id;
+    //      } else {
+    //        nearest = keyrange_id + 1;
+    //      }
+    //      keyrange_id++;
+    //    }
+    //    if (keyrange_id == 5) {
+    //      // it's not in any one of the key range, find the nearest
+    //      keyrange_id = nearest;
+    //    }
+    // Calculate and select one key-range that contains the new key
+    int64_t start = 0, end = static_cast<int64_t>(op_key_range_.size());
+    while (start + 1 < end) {
+      int64_t mid = start + (end - start) / 2;
+      assert(mid >= 0 && mid < static_cast<int64_t>(op_key_range_.size()));
+      if (keyrange_rand < op_key_range_[mid].keyrange_start) {
+        end = mid;
+      } else {
+        start = mid;
+      }
+    }
+    int64_t keyrange_id = start;
+    // Select one key in the key-range and compose the keyID
+    int64_t key_offset = 0;
+    key_offset = ini_rand % op_key_range_[keyrange_id].keyrange_keys;
+
+    return op_key_range_[keyrange_id].keyrange_start + key_offset;
+  }
 };
 
 class GenerateTwoTermExpKeys {
@@ -2758,21 +2867,18 @@ class Benchmark {
           }
         }
       }
-      if (name == "ycsb") {
+      if (name == "load") {
         fresh_db = true;
-        method = &Benchmark::YCSBIntegrate;
-      } else if (name == "ycsb_load") {
-        fresh_db = true;
-        method = &Benchmark::YCSBLoader;
-      } else if (name == "ycsb_run") {
+        method = &Benchmark::RangedLoader;
+      } else if (name == "run") {
         // plain running
         fresh_db = false;
-        method = &Benchmark::YCSBRunner;
-      } else if (name == "ycsb_iterate_migrate_src") {
+        method = &Benchmark::RangedRunner;
+      } else if (name == "iterate_migrate_src") {
         fresh_db = false;
         num_threads++;
         method = &Benchmark::YCSB_Run_And_Iterate;
-      } else if (name == "ycsb_iterate_migrate_dst") {
+      } else if (name == "iterate_migrate_dst") {
         num_threads++;
         method = &Benchmark::YCSB_Run_With_Loading;
       } else if (name == "stats") {
@@ -3911,6 +4017,193 @@ class Benchmark {
     }
   }
 
+  void RangedWorking(ThreadState* thread, ycsbc::CoreWorkload* workload,
+                     int load, int run, RangedKeysGenerator* key_gen) {
+    long remain_loading = FLAGS_load_num;
+    long remain_running = FLAGS_running_num;
+    const int test_duration = FLAGS_duration;
+    int64_t ops_per_stage = 1;
+
+    // load first, then run
+    Duration loading_duration(test_duration, remain_loading, ops_per_stage);
+    Duration running_duration(test_duration, remain_running, ops_per_stage);
+    int stage = 0;
+    //    WriteBatch batch;
+    Status s;
+    RandomGenerator gen;
+    int64_t bytes = 0;
+    Duration duration = loading_duration;
+    rocksdb::ReadOptions r_op;
+    rocksdb::WriteOptions w_op;
+    int64_t ini_rand = 0;
+
+    if (load) {
+      while (!duration.Done(entries_per_batch_)) {
+        DB* db = SelectDB(thread);
+        if (duration.GetStage() != stage) {
+          stage = duration.GetStage();
+          if (db_.db != nullptr) {
+            db_.CreateNewCf(open_options_, stage);
+          } else {
+            for (auto& input_db : multi_dbs_) {
+              input_db.CreateNewCf(open_options_, stage);
+            }
+          }
+        }
+        Slice key;
+        ini_rand = GetRandomKey(&thread->rand);
+        int64_t key_value = key_gen->GenerateKeys(ini_rand);
+        GenerateKeyFromInt(key_value, FLAGS_num, &key);
+        Slice val = gen.Generate(value_size_);
+        db_.db->Put(w_op, key, val);
+
+        int64_t batch_bytes = 0;
+        for (int64_t j = 0; j < entries_per_batch_; j++) {
+          batch_bytes += val.size() + key.size();
+          bytes += val.size() + key.size();
+        }
+        if (thread->shared->write_rate_limiter.get() != nullptr) {
+          thread->shared->write_rate_limiter->Request(
+              batch_bytes, Env::IO_HIGH, nullptr /* stats */,
+              RateLimiter::OpType::kWrite);
+          thread->stats.ResetLastOpTime();
+        }
+        thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kWrite);
+      }
+      thread->stats.AddBytes(bytes);
+    }
+
+    if (run) {
+      duration = running_duration;
+
+      Status op_status;
+      int read_count = 0;
+      int found_count = 0;
+      int blind_updates = 0;
+      while (!duration.Done(1)) {
+        if (duration.GetStage() != stage) {
+          stage = duration.GetStage();
+          if (db_.db != nullptr) {
+            db_.CreateNewCf(open_options_, stage);
+          } else {
+            for (auto& db : multi_dbs_) {
+              db.CreateNewCf(open_options_, stage);
+            }
+          }
+        }
+        std::string data;
+
+        Slice key;
+        ini_rand = GetRandomKey(&thread->rand);
+        int64_t key_value = key_gen->GenerateKeys(ini_rand);
+        GenerateKeyFromInt(key_value, FLAGS_num, &key);
+        DB* db = SelectDB(thread);
+        switch (workload->NextOp()) {
+          case ycsbc::READ: {
+            op_status = db_.db->Get(r_op, key, &data);
+            if (op_status.ok()) {
+              found_count++;
+              bytes += key.size() + data.size();
+            }
+            read_count++;
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kRead);
+          } break;
+          case ycsbc::UPDATE: {
+            Slice val = gen.Generate(value_size_);
+            // In rocksdb, update is just another put operation.
+            op_status = db_.db->Put(w_op, key, val);
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kUpdate);
+          } break;
+          case ycsbc::INSERT: {
+            Slice val = gen.Generate(value_size_);
+            // In rocksdb, update is just another put operation.
+            op_status = db_.db->Put(w_op, key, val);
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kWrite);
+          } break;
+          case ycsbc::SCAN: {
+            Iterator* db_iter = db_.db->NewIterator(rocksdb::ReadOptions());
+            db_iter->Seek(key);
+            int len = workload->scan_len_chooser_->Next();
+            for (int i = 0; db_iter->Valid() && i < len; i++) {
+              data = db_iter->value().ToString();
+              db_iter->Next();
+            }
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kSeek);
+            delete db_iter;
+          } break;
+          case ycsbc::READMODIFYWRITE: {
+            op_status = db_.db->Get(r_op, key, &data);
+            read_count++;
+            if (op_status.IsNotFound()) {
+              blind_updates++;
+            }
+            Slice val = gen.Generate(value_size_);
+            op_status = db_.db->Put(w_op, key, val);
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kUpdate);
+          } break;
+          case ycsbc::DELETE: {
+            op_status = db_.db->Delete(w_op, key);
+            thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kDelete);
+          } break;
+          case ycsbc::MAXOPTYPE:
+            throw ycsbc::utils::Exception(
+                "Operation request is not recognized!");
+        }
+      }
+      thread->stats.AddBytes(bytes);
+    }
+  }
+  void RangedLoader(ThreadState* thread) {
+    ycsbc::CoreWorkload wl;
+    ycsbc::utils::Properties props;
+    InitWorkload(wl, props);
+    RangedKeysGenerator key_gen;
+    int64_t keys_in_each_range = FLAGS_load_num / FLAGS_keyrange_num;
+    // the key range must be larger than the keys inside
+    assert(keys_in_each_range < FLAGS_keyrange_size);
+    int64_t start = FLAGS_keyrange_start;
+    int i = 0;
+    for (i = 0; i < FLAGS_keyrange_num; i++) {
+      // initialize each range
+      key_gen.AddKeyRange(start, FLAGS_keyrange_size, keys_in_each_range);
+    }
+    if (FLAGS_migrate_from < i * FLAGS_keyrange_size + FLAGS_keyrange_start) {
+      FLAGS_migrate_from = i * FLAGS_keyrange_size + FLAGS_keyrange_start + 5;
+    }
+    KeyrangeUnit migration_target(FLAGS_migrate_from, FLAGS_migrate_range,
+                                  FLAGS_migrate_keys);
+    key_gen.SpecifyMigrateCandidate(migration_target, true);
+    key_gen.InitGenerator();
+    RangedWorking(thread, &wl, true, false, &key_gen);
+  }
+  void RangedRunner(ThreadState* thread) {
+    ycsbc::CoreWorkload wl;
+    ycsbc::utils::Properties props;
+    InitWorkload(wl, props);
+    RangedKeysGenerator key_gen;
+
+    RangedWorking(thread, &wl, false, true, &key_gen);
+  }
+
+  void Ranged_Run_And_Iterate(ThreadState* thread) {
+    if (thread->tid > 0) {
+      RangedRunner(thread);
+    } else {
+      KeyrangeUnit migration_range = {FLAGS_migrate_from, FLAGS_migrate_range,
+                                      FLAGS_migrate_keys};
+      BGIterateKeyrange(thread, &migration_range);
+    }
+  }
+
+  void Ranged_Run_With_Loading(ThreadState* thread) {
+    if (thread->tid > 0) {
+      RangedRunner(thread);
+    } else {
+      KeyrangeUnit migration_range = {FLAGS_migrate_from, FLAGS_migrate_range,
+                                      FLAGS_migrate_keys};
+      BGInsertKeyrange(thread, &migration_range);
+    }
+  }
   void YCSBLoader(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
@@ -3928,15 +4221,16 @@ class Benchmark {
     if (thread->tid > 0) {
       YCSBRunner(thread);
     } else {
-      struct KeyrangeUnit migration_range = {1, 1, 1};
+      KeyrangeUnit migration_range = {1, 1, 1};
       BGIterateKeyrange(thread, &migration_range);
     }
   }
 
   void YCSB_Run_With_Loading(ThreadState* thread) {
     if (thread->tid > 0) {
+      YCSBRunner(thread);
     } else {
-      struct KeyrangeUnit migration_range = {1, 1, 1};
+      KeyrangeUnit migration_range = {1, 1, 1};
       BGInsertKeyrange(thread, &migration_range);
     }
   }
@@ -4369,14 +4663,12 @@ class Benchmark {
     }
   }
 
-  void BGIterateKeyrange(ThreadState* thread,
-                         struct KeyrangeUnit* migration_range) {
+  void BGIterateKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
     // this will be similar to the
     // TODO: find out how to iterate a key range later
   }
 
-  void BGInsertKeyrange(ThreadState* thread,
-                        struct KeyrangeUnit* migration_range) {
+  void BGInsertKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
     // this will be similar to the
     // TODO: find out how to iterate a key range later
   }
