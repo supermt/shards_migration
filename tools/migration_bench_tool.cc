@@ -2051,15 +2051,18 @@ class RangedKeysGenerator {
     target->keyrange_start = start;
     target->keyrange_access = end - start;
     target->keyrange_keys = num_of_keys;
+    return Status::OK();
   }
 
   // TODO: discussion, the keys in the migrated range, should we insert into dst
   //  before or after the migration.
   Status AddKeyRange(int64_t start, int64_t access, int64_t keys) {
     this->op_key_range_.emplace_back(start, access, keys);
+    return Status::OK();
   }
   Status AddKeyRange(KeyrangeUnit& new_input) {
     this->op_key_range_.emplace_back(new_input);
+    return Status::OK();
   }
 
   Status SpecifyMigrateCandidate(KeyrangeUnit& migration_target,
@@ -4686,7 +4689,7 @@ class Benchmark {
     }
   }
 
-  void BGIterateKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
+  void BGIterateKeyrange(ThreadState* thread, KeyrangeUnit* /*migration_range*/) {
     // this will be similar to BGScan
     if (FLAGS_num_multi_db > 0) {
       fprintf(stderr, "Not supporting multiple DBs.\n");
@@ -4724,7 +4727,7 @@ class Benchmark {
     delete iter;
   }
 
-  void BGInsertKeyrange(ThreadState* thread, KeyrangeUnit* migration_range) {
+  void BGInsertKeyrange(ThreadState* thread, KeyrangeUnit* /*migration_range*/) {
     // this will be similar to the
     RangedKeysGenerator key_gen;
     key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
