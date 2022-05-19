@@ -4047,6 +4047,9 @@ class Benchmark {
     rocksdb::WriteOptions w_op;
     int64_t ini_rand = 0;
 
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
     if (load) {
       while (!duration.Done(entries_per_batch_)) {
         DB* db = SelectDB(thread);
@@ -4060,7 +4063,7 @@ class Benchmark {
             }
           }
         }
-        Slice key;
+
         ini_rand = GetRandomKey(&thread->rand);
         int64_t key_value = key_gen->GenerateKeys(ini_rand);
         GenerateKeyFromInt(key_value, FLAGS_num, &key);
@@ -4103,7 +4106,6 @@ class Benchmark {
         }
         std::string data;
 
-        Slice key;
         ini_rand = GetRandomKey(&thread->rand);
         int64_t key_value = key_gen->GenerateKeys(ini_rand);
         GenerateKeyFromInt(key_value, FLAGS_num, &key);
@@ -4176,7 +4178,8 @@ class Benchmark {
     int i = 0;
     for (i = 0; i < FLAGS_keyrange_num; i++) {
       // initialize each range
-      key_gen.AddKeyRange(start, FLAGS_keyrange_size, keys_in_each_range);
+      key_gen.AddKeyRange(FLAGS_keyrange_size * i + start, FLAGS_keyrange_size,
+                          keys_in_each_range);
     }
     key_gen.InitGenerator();
     RangedWorking(thread, &wl, true, false, &key_gen);
@@ -4689,7 +4692,8 @@ class Benchmark {
     }
   }
 
-  void BGIterateKeyrange(ThreadState* thread, KeyrangeUnit* /*migration_range*/) {
+  void BGIterateKeyrange(ThreadState* thread,
+                         KeyrangeUnit* /*migration_range*/) {
     // this will be similar to BGScan
     if (FLAGS_num_multi_db > 0) {
       fprintf(stderr, "Not supporting multiple DBs.\n");
@@ -4727,7 +4731,8 @@ class Benchmark {
     delete iter;
   }
 
-  void BGInsertKeyrange(ThreadState* thread, KeyrangeUnit* /*migration_range*/) {
+  void BGInsertKeyrange(ThreadState* thread,
+                        KeyrangeUnit* /*migration_range*/) {
     // this will be similar to the
     RangedKeysGenerator key_gen;
     key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
@@ -4739,6 +4744,10 @@ class Benchmark {
     uint64_t bytes = 0;
     int stage = 0;
     RandomGenerator gen;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
       if (duration.GetStage() != stage) {
@@ -4751,7 +4760,6 @@ class Benchmark {
           }
         }
       }
-      Slice key;
       ini_rand = GetRandomKey(&thread->rand);
       int64_t key_value = key_gen.GenerateKeys(ini_rand);
       GenerateKeyFromInt(key_value, FLAGS_num, &key);
