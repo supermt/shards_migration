@@ -4197,7 +4197,8 @@ class Benchmark {
     int i = 0;
     for (i = 0; i < FLAGS_keyrange_num; i++) {
       // initialize each range
-      key_gen.AddKeyRange(start, FLAGS_keyrange_size, keys_in_each_range);
+      key_gen.AddKeyRange(FLAGS_keyrange_size * i + start, FLAGS_keyrange_size,
+                          keys_in_each_range);
     }
     key_gen.InitGenerator();
     RangedWorking(thread, &wl, false, true, &key_gen);
@@ -4708,9 +4709,11 @@ class Benchmark {
     uint64_t num_next = 0;
     // we need to first seek to the begin
 
+    std::unique_ptr<const char[]> key_guard;
+    Slice seek_start = AllocateKey(&key_guard);
     ReadOptions read_options;
     Iterator* iter = db_.db->NewIterator(read_options);
-    Slice seek_start;
+
     GenerateKeyFromInt(FLAGS_migrate_from, FLAGS_num, &seek_start);
     iter->Seek(seek_start);
 
