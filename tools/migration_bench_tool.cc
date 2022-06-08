@@ -106,7 +106,11 @@ DEFINE_string(
     "src_load,"
     "src_run,"
     "dst_load,"
-    "dst_run,",
+    "dst_run,"
+    "migrate_src_load,"
+    "migrate_src_run,"
+    "migrate_dst_load,"
+    "migrate_dst_run,",
 
     "This is a single machine test for the shards migration."
     "All system runs at the same logic: run the ycsb filling first, "
