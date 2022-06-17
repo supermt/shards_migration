@@ -81,8 +81,7 @@ Status ExternalSstFileIngestionJob::Prepare(
       return Status::InvalidArgument("File contain no entries");
     }
 
-    if (!f.smallest_internal_key.Valid() ||
-        !f.largest_internal_key.Valid()) {
+    if (!f.smallest_internal_key.Valid() || !f.largest_internal_key.Valid()) {
       return Status::Corruption("Generated table have corrupted keys");
     }
   }
@@ -93,9 +92,8 @@ Status ExternalSstFileIngestionJob::Prepare(
     f.fd = FileDescriptor(next_file_number++, 0, f.file_size);
     f.copy_file = false;
     const std::string path_outside_db = f.external_file_path;
-    const std::string path_inside_db =
-        TableFileName(cfd_->ioptions()->cf_paths, f.fd.GetNumber(),
-                      f.fd.GetPathId());
+    const std::string path_inside_db = TableFileName(
+        cfd_->ioptions()->cf_paths, f.fd.GetNumber(), f.fd.GetPathId());
     if (ingestion_options_.move_files) {
       status = env_->LinkFile(path_outside_db, path_inside_db);
       if (status.ok()) {
@@ -222,8 +220,8 @@ Status ExternalSstFileIngestionJob::Run() {
       status = CheckLevelForIngestedBehindFile(&f);
     } else {
       status = AssignLevelAndSeqnoForIngestedFile(
-         super_version, force_global_seqno, cfd_->ioptions()->compaction_style,
-         &f, &assigned_seqno);
+          super_version, force_global_seqno, cfd_->ioptions()->compaction_style,
+          &f, &assigned_seqno);
     }
     if (!status.ok()) {
       return status;
@@ -251,7 +249,8 @@ void ExternalSstFileIngestionJob::UpdateStats() {
   uint64_t total_l0_files = 0;
   uint64_t total_time = env_->NowMicros() - job_start_time_;
   for (IngestedFileInfo& f : files_to_ingest_) {
-    InternalStats::CompactionStats stats(CompactionReason::kExternalSstIngestion, 1);
+    InternalStats::CompactionStats stats(
+        CompactionReason::kExternalSstIngestion, 1);
     stats.micros = total_time;
     // If actual copy occurred for this file, then we need to count the file
     // size as the actual bytes written. If the file was linked, then we ignore
@@ -337,8 +336,8 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
   if (!status.ok()) {
     return status;
   }
-  sst_file_reader.reset(new RandomAccessFileReader(std::move(sst_file),
-                                                   external_file));
+  sst_file_reader.reset(
+      new RandomAccessFileReader(std::move(sst_file), external_file));
 
   status = cfd_->ioptions()->table_factory->NewTableReader(
       TableReaderOptions(*cfd_->ioptions(),
@@ -390,15 +389,16 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
       file_to_ingest->global_seqno_offset = 0;
       return Status::Corruption("Was not able to find file global seqno field");
     }
-    file_to_ingest->global_seqno_offset = static_cast<size_t>(offsets_iter->second);
+    file_to_ingest->global_seqno_offset =
+        static_cast<size_t>(offsets_iter->second);
   } else if (file_to_ingest->version == 1) {
     // SST file V1 should not have global seqno field
     assert(seqno_iter == uprops.end());
     file_to_ingest->original_seqno = 0;
     if (ingestion_options_.allow_blocking_flush ||
-            ingestion_options_.allow_global_seqno) {
+        ingestion_options_.allow_global_seqno) {
       return Status::InvalidArgument(
-            "External SST file V1 does not support global seqno");
+          "External SST file V1 does not support global seqno");
     }
   } else {
     return Status::InvalidArgument("External file version is not supported");
@@ -422,8 +422,10 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
       table_reader->NewRangeTombstoneIterator(ro));
 
   // Get first (smallest) and last (largest) key from file.
-  file_to_ingest->smallest_internal_key = InternalKey("", 0, ValueType::kTypeValue);
-  file_to_ingest->largest_internal_key = InternalKey("", 0, ValueType::kTypeValue);
+  file_to_ingest->smallest_internal_key =
+      InternalKey("", 0, ValueType::kTypeValue);
+  file_to_ingest->largest_internal_key =
+      InternalKey("", 0, ValueType::kTypeValue);
   bool bounds_set = false;
   iter->SeekToFirst();
   if (iter->Valid()) {
@@ -459,11 +461,15 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
       RangeTombstone tombstone(key, range_del_iter->value());
 
       InternalKey start_key = tombstone.SerializeKey();
-      if (!bounds_set || sstableKeyCompare(ucmp, start_key, file_to_ingest->smallest_internal_key) < 0) {
+      if (!bounds_set ||
+          sstableKeyCompare(ucmp, start_key,
+                            file_to_ingest->smallest_internal_key) < 0) {
         file_to_ingest->smallest_internal_key = start_key;
       }
       InternalKey end_key = tombstone.SerializeEndKey();
-      if (!bounds_set || sstableKeyCompare(ucmp, end_key, file_to_ingest->largest_internal_key) > 0) {
+      if (!bounds_set ||
+          sstableKeyCompare(ucmp, end_key,
+                            file_to_ingest->largest_internal_key) > 0) {
         file_to_ingest->largest_internal_key = end_key;
       }
       bounds_set = true;
@@ -505,9 +511,10 @@ Status ExternalSstFileIngestionJob::AssignLevelAndSeqnoForIngestedFile(
 
     if (vstorage->NumLevelFiles(lvl) > 0) {
       bool overlap_with_level = false;
-      status = sv->current->OverlapWithLevelIterator(ro, env_options_,
-          file_to_ingest->smallest_internal_key.user_key(), file_to_ingest->largest_internal_key.user_key(),
-          lvl, &overlap_with_level);
+      status = sv->current->OverlapWithLevelIterator(
+          ro, env_options_, file_to_ingest->smallest_internal_key.user_key(),
+          file_to_ingest->largest_internal_key.user_key(), lvl,
+          &overlap_with_level);
       if (!status.ok()) {
         return status;
       }
@@ -547,7 +554,7 @@ Status ExternalSstFileIngestionJob::AssignLevelAndSeqnoForIngestedFile(
       target_level = lvl;
     }
   }
- TEST_SYNC_POINT_CALLBACK(
+  TEST_SYNC_POINT_CALLBACK(
       "ExternalSstFileIngestionJob::AssignLevelAndSeqnoForIngestedFile",
       &overlap_with_db);
   file_to_ingest->picked_level = target_level;
@@ -562,10 +569,10 @@ Status ExternalSstFileIngestionJob::CheckLevelForIngestedBehindFile(
   auto* vstorage = cfd_->current()->storage_info();
   // first check if new files fit in the bottommost level
   int bottom_lvl = cfd_->NumberLevels() - 1;
-  if(!IngestedFileFitInLevel(file_to_ingest, bottom_lvl)) {
+  if (!IngestedFileFitInLevel(file_to_ingest, bottom_lvl)) {
     return Status::InvalidArgument(
-      "Can't ingest_behind file as it doesn't fit "
-      "at the bottommost level!");
+        "Can't ingest_behind file as it doesn't fit "
+        "at the bottommost level!");
   }
 
   // second check if despite allow_ingest_behind=true we still have 0 seqnums
@@ -574,8 +581,8 @@ Status ExternalSstFileIngestionJob::CheckLevelForIngestedBehindFile(
     for (auto file : vstorage->LevelFiles(lvl)) {
       if (file->fd.smallest_seqno == 0) {
         return Status::InvalidArgument(
-          "Can't ingest_behind file as despite allow_ingest_behind=true "
-          "there are files with 0 seqno in database at upper levels!");
+            "Can't ingest_behind file as despite allow_ingest_behind=true "
+            "there are files with 0 seqno in database at upper levels!");
       }
     }
   }
@@ -640,7 +647,8 @@ bool ExternalSstFileIngestionJob::IngestedFileFitInLevel(
   }
 
   auto* vstorage = cfd_->current()->storage_info();
-  Slice file_smallest_user_key(file_to_ingest->smallest_internal_key.user_key());
+  Slice file_smallest_user_key(
+      file_to_ingest->smallest_internal_key.user_key());
   Slice file_largest_user_key(file_to_ingest->largest_internal_key.user_key());
 
   if (vstorage->OverlapInLevel(level, &file_smallest_user_key,

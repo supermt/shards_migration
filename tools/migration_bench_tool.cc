@@ -91,15 +91,16 @@ using GFLAGS_NAMESPACE::RegisterFlagValidator;
 using GFLAGS_NAMESPACE::SetUsageMessage;
 
 DEFINE_string(ycsb_workload, "", "The workload of YCSB");
-DEFINE_int64(load_num, 100000, "Num of operations in loading phrase");
-DEFINE_int64(running_num, 100000, "Num of operations in running phrase");
+DEFINE_int64(load_num, 10000000, "Num of operations in loading phrase");
+DEFINE_int64(running_num, 10000000, "Num of operations in running phrase");
 DEFINE_int64(keyrange_num, 5, "Number of Keyranges");
-DEFINE_int64(keyrange_start, 1000000, "Number of Keyranges");
-DEFINE_int64(keyrange_size, 1000000, "Number of Keyranges");
+DEFINE_int64(keyrange_start, 100000000, "Number of Keyranges");
+DEFINE_int64(keyrange_size, 100000000, "Number of Keyranges");
 DEFINE_bool(insert_while_migration, false, "");
 DEFINE_int64(migrate_from, 1000000, "The start key of migration point");
 DEFINE_int64(migrate_range, 1000000, "The start key of migration point");
 DEFINE_int64(migrate_keys, 10000, "The start key of migration point");
+DEFINE_bool(move_files, false, "Whether move the files to dst");
 
 DEFINE_string(
     benchmarks,
@@ -110,7 +111,8 @@ DEFINE_string(
     "migrate_src_load,"
     "migrate_src_run,"
     "migrate_dst_load,"
-    "migrate_dst_run,",
+    "migrate_dst_run,"
+    "migration_to_level_0,",
 
     "This is a single machine test for the shards migration."
     "All system runs at the same logic: run the ycsb filling first, "
@@ -771,7 +773,7 @@ static std::string ColumnFamilyName(size_t i) {
   }
 }
 
-DEFINE_string(compression_type, "snappy",
+DEFINE_string(compression_type, "none",
               "Algorithm to use to compress the database");
 static enum rocksdb::CompressionType FLAGS_compression_type_e =
     rocksdb::kSnappyCompression;
@@ -2895,7 +2897,13 @@ class Benchmark {
         fresh_db = false;
         num_threads++;
         method = &Benchmark::Ranged_Run_With_Loading;
-      } else if (name == "stats") {
+      } else if (name == "migration_to_level_0") {
+        fresh_db = true;
+        num_threads++;
+        method = &Benchmark::Migration_test;
+      }
+
+      else if (name == "stats") {
         PrintStats("rocksdb.stats");
       } else if (name == "resetstats") {
         ResetStats();
@@ -4238,6 +4246,72 @@ class Benchmark {
     }
   }
 
+  void Migration_test(ThreadState* thread) {
+    if (thread->tid > 0) {
+      RangedRunner(thread);
+    } else {
+      RangedKeysGenerator key_gen;
+      key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
+                          FLAGS_migrate_keys);
+
+      int max_migrate_keys = FLAGS_migrate_from + FLAGS_migrate_range;
+
+      Duration duration(FLAGS_duration, FLAGS_migrate_keys);
+      // perform integrate
+      std::string sst_files_dir_ = FLAGS_db + "/external_sst_file_basic_test/";
+      FLAGS_env->DeleteDir(sst_files_dir_);
+      FLAGS_env->CreateDir(sst_files_dir_);
+      int64_t ini_rand = 0;
+
+      std::vector<std::string> files;
+      // generate file first
+      int FLAGS_max_file_num = 10;
+      int FLAGS_distinct_num =
+          FLAGS_write_buffer_size * FLAGS_max_file_num + 10;
+      std::unique_ptr<const char[]> key_guard;
+      Slice key = AllocateKey(&key_guard);
+      std::string value("v", FLAGS_value_size);
+      int rand_key = 0;
+      for (int file_id = 0; file_id < FLAGS_max_file_num; file_id++) {
+        std::string file_path = sst_files_dir_ + ToString(file_id) + ".sst";
+        SstFileWriter sst_file_writer(EnvOptions(), open_options_);
+        Status s = sst_file_writer.Open(file_path);
+        if (!s.ok()) {
+          std::cout << s.ToString() << std::endl;
+          exit(-1);
+        }
+
+        uint64_t start_key = file_id * FLAGS_write_buffer_size /
+                             (FLAGS_key_size + FLAGS_value_size);
+        for (auto i = 0;
+             i < FLAGS_write_buffer_size / (FLAGS_key_size + FLAGS_value_size);
+             i++) {
+          int64_t key_value = key_gen.GenerateKeys(i + start_key);
+          if (key_value >= max_migrate_keys) {
+            break;
+          }
+          GenerateKeyFromInt(key_value, FLAGS_num, &key);
+          ValueType value_type = kTypeValue;  // after compaction
+          s = sst_file_writer.Put(key, value);
+          if (!s.ok()) {
+            std::cout << s.ToString() << std::endl;
+            sst_file_writer.Finish();
+            exit(-1);
+          }
+        }
+        if (s.ok()) {
+          sst_file_writer.Finish();
+        }
+        files.push_back(file_path);
+      }
+
+      IngestExternalFileOptions ingest_opts;
+      ingest_opts.move_files = FLAGS_move_files;
+
+      db_.db->IngestExternalFile(files, ingest_opts);
+    }
+  }
+
   void YCSBLoader(ThreadState* thread) {
     ycsbc::CoreWorkload wl;
     ycsbc::utils::Properties props;
@@ -4790,6 +4864,75 @@ class Benchmark {
   }
 
   void BGWriter(ThreadState* thread, enum OperationType write_merge) {
+    // Special thread that keeps writing until other threads are done.
+    RandomGenerator gen;
+    int64_t bytes = 0;
+
+    std::unique_ptr<RateLimiter> write_rate_limiter;
+    if (FLAGS_benchmark_write_rate_limit > 0) {
+      write_rate_limiter.reset(
+          NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    }
+
+    // Don't merge stats from this thread with the readers.
+    thread->stats.SetExcludeFromMerge();
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    uint32_t written = 0;
+    bool hint_printed = false;
+
+    while (true) {
+      DB* db = SelectDB(thread);
+      {
+        MutexLock l(&thread->shared->mu);
+        if (FLAGS_finish_after_writes && written == writes_) {
+          fprintf(stderr, "Exiting the writer after %u writes...\n", written);
+          break;
+        }
+        if (thread->shared->num_done + 1 >= thread->shared->num_initialized) {
+          // Other threads have finished
+          if (FLAGS_finish_after_writes) {
+            // Wait for the writes to be finished
+            if (!hint_printed) {
+              fprintf(stderr, "Reads are finished. Have %d more writes to do\n",
+                      static_cast<int>(writes_) - written);
+              hint_printed = true;
+            }
+          } else {
+            // Finish the write immediately
+            break;
+          }
+        }
+      }
+
+      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      Status s;
+
+      if (write_merge == kWrite) {
+        s = db->Put(write_options_, key, gen.Generate(value_size_));
+      } else {
+        s = db->Merge(write_options_, key, gen.Generate(value_size_));
+      }
+      written++;
+
+      if (!s.ok()) {
+        fprintf(stderr, "put or merge error: %s\n", s.ToString().c_str());
+        exit(1);
+      }
+      bytes += key.size() + value_size_;
+      thread->stats.FinishedOps(&db_, db_.db, 1, kWrite);
+
+      if (FLAGS_benchmark_write_rate_limit > 0) {
+        write_rate_limiter->Request(
+            entries_per_batch_ * (value_size_ + key_size_), Env::IO_HIGH,
+            nullptr /* stats */, RateLimiter::OpType::kWrite);
+      }
+    }
+    thread->stats.AddBytes(bytes);
+  }
+
+  void BGFill(ThreadState* thread, enum OperationType write_merge) {
     // Special thread that keeps writing until other threads are done.
     RandomGenerator gen;
     int64_t bytes = 0;
