@@ -216,7 +216,7 @@ class HdfsEnv : public Env {
     return fs;
   }
 
-  void split(const std::string &s, char delim,
+  void split(const std::string  &s, char delim,
              std::vector<std::string> &elems) {
     elems.clear();
     size_t prev = 0;

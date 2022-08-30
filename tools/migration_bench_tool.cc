@@ -91,15 +91,15 @@ using GFLAGS_NAMESPACE::RegisterFlagValidator;
 using GFLAGS_NAMESPACE::SetUsageMessage;
 
 DEFINE_string(ycsb_workload, "", "The workload of YCSB");
-DEFINE_int64(load_num, 10000000, "Num of operations in loading phrase");
-DEFINE_int64(running_num, 10000000, "Num of operations in running phrase");
+DEFINE_int64(load_num, 1000000, "Num of operations in loading phrase");
+DEFINE_int64(running_num, 1000000, "Num of operations in running phrase");
 DEFINE_int64(keyrange_num, 5, "Number of Keyranges");
-DEFINE_int64(keyrange_start, 100000000, "Number of Keyranges");
-DEFINE_int64(keyrange_size, 100000000, "Number of Keyranges");
+DEFINE_int64(keyrange_start, 20000000, "Number of Keyranges");
+DEFINE_int64(keyrange_size, 10000000, "Number of Keyranges");
 DEFINE_bool(insert_while_migration, false, "");
-DEFINE_int64(migrate_from, 1000000, "The start key of migration point");
-DEFINE_int64(migrate_range, 1000000, "The start key of migration point");
-DEFINE_int64(migrate_keys, 10000, "The start key of migration point");
+DEFINE_int64(migrate_from, 10000000, "The start key of migration point");
+DEFINE_int64(migrate_range, 10000000, "The start key of migration point");
+DEFINE_int64(migrate_keys, 1000000 / 2, "The start key of migration point");
 DEFINE_bool(move_files, false, "Whether move the files to dst");
 
 DEFINE_string(
@@ -168,7 +168,7 @@ DEFINE_int32(duration, 0,
              "Time in seconds for the random-ops tests to run."
              " When 0 then num & reads determine the test duration");
 
-DEFINE_int32(value_size, 100, "Size of each value");
+DEFINE_int32(value_size, 1000, "Size of each value");
 
 DEFINE_int32(seek_nexts, 0,
              "How many times to call Next() after Seek() in "
@@ -2084,11 +2084,15 @@ class RangedKeysGenerator {
     initialized = false;
     std::sort(this->op_key_range_.begin(), this->op_key_range_.end(),
               compareKeyrange);
-    key_value_max_ = op_key_range_.end()->keyrange_start +
-                     op_key_range_.end()->keyrange_access;
+    key_value_max_ = op_key_range_[op_key_range_.size() - 1].keyrange_start +
+                     op_key_range_[op_key_range_.size() - 1].keyrange_access;
 
     key_value_min_ = op_key_range_.begin()->keyrange_start;
-
+    for (auto op_range : op_key_range_) {
+      std::cout << op_range.keyrange_start << std::endl;
+      std::cout << op_range.keyrange_access << std::endl;
+      std::cout << op_range.keyrange_keys << std::endl;
+    }
     initialized = true;
     return Status::OK();
   }
@@ -2098,28 +2102,6 @@ class RangedKeysGenerator {
     // first, it should be in the target range
     int64_t keyrange_rand =
         key_value_min_ + (ini_rand % (key_value_max_ - key_value_min_));
-    // next, find the keyrange it belongs
-    //    int64_t keyrange_id = 0;
-    //    int nearest = 0;
-    //    int last_max = key_value_min_;
-    //    for (auto& range_unit : op_key_range_) {
-    //      if (range_unit.isIn(keyrange_rand)) {
-    //        break;
-    //      }
-    //      last_max = range_unit.keyrange_start + range_unit.keyrange_access;
-    //      if (keyrange_rand - last_max <
-    //          range_unit.keyrange_start - keyrange_rand) {
-    //        nearest = keyrange_id;
-    //      } else {
-    //        nearest = keyrange_id + 1;
-    //      }
-    //      keyrange_id++;
-    //    }
-    //    if (keyrange_id == 5) {
-    //      // it's not in any one of the key range, find the nearest
-    //      keyrange_id = nearest;
-    //    }
-    // Calculate and select one key-range that contains the new key
     int64_t start = 0, end = static_cast<int64_t>(op_key_range_.size());
     while (start + 1 < end) {
       int64_t mid = start + (end - start) / 2;
@@ -2898,7 +2880,7 @@ class Benchmark {
         num_threads++;
         method = &Benchmark::Ranged_Run_With_Loading;
       } else if (name == "migration_to_level_0") {
-        fresh_db = true;
+        fresh_db = false;
         num_threads++;
         method = &Benchmark::Migration_test;
       }
@@ -4232,7 +4214,12 @@ class Benchmark {
     } else {
       KeyrangeUnit migration_range = {FLAGS_migrate_from, FLAGS_migrate_range,
                                       FLAGS_migrate_keys};
+      std::cout << "start ingestion" << std::endl;
+      uint64_t start = FLAGS_env->NowMicros();
       BGIterateKeyrange(thread, &migration_range);
+      uint64_t end = FLAGS_env->NowMicros();
+      std::cout << "end ingestion, time taken:" << (end - start) / 1000000
+                << std::endl;
     }
   }
 
@@ -4240,9 +4227,39 @@ class Benchmark {
     if (thread->tid > 0) {
       RangedRunner(thread);
     } else {
-      KeyrangeUnit migration_range = {FLAGS_migrate_from, FLAGS_migrate_range,
-                                      FLAGS_migrate_keys};
-      BGInsertKeyrange(thread, &migration_range);
+      RangedKeysGenerator key_gen;
+      // use full ranges.
+      std::cout << "start ingestion" << std::endl;
+      uint64_t start = FLAGS_env->NowMicros();
+
+      key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
+                          FLAGS_migrate_range);
+
+      key_gen.InitGenerator();
+
+      int max_migrate_keys = FLAGS_migrate_from + FLAGS_migrate_range;
+      // perform integrate
+      int64_t ini_rand = 0;
+      // generate file first
+      std::unique_ptr<const char[]> key_guard;
+      Slice key = AllocateKey(&key_guard);
+      std::string value("v", FLAGS_value_size);
+      int rand_key = 0;
+      WriteOptions wopt;
+      for (int i = FLAGS_migrate_from; i < max_migrate_keys;
+           i += FLAGS_migrate_range / FLAGS_migrate_keys) {
+        int64_t key_value = key_gen.GenerateKeys(i);
+        GenerateKeyFromInt(key_value, FLAGS_num, &key);
+        db_.db->Put(wopt, key, value);
+        ValueType value_type = kTypeValue;  // after compaction
+      }
+
+      uint64_t end = FLAGS_env->NowMicros();
+      std::cout << "end ingestion, time taken:" << (end - start) / 1000000
+                << std::endl;
+      FLAGS_keyrange_start = FLAGS_migrate_from;
+      FLAGS_keyrange_num++;
+      RangedRunner(thread);
     }
   }
 
@@ -4251,12 +4268,14 @@ class Benchmark {
       RangedRunner(thread);
     } else {
       RangedKeysGenerator key_gen;
+      // use full ranges.
+
       key_gen.AddKeyRange(FLAGS_migrate_from, FLAGS_migrate_range,
-                          FLAGS_migrate_keys);
+                          FLAGS_migrate_range);
+
+      key_gen.InitGenerator();
 
       int max_migrate_keys = FLAGS_migrate_from + FLAGS_migrate_range;
-
-      Duration duration(FLAGS_duration, FLAGS_migrate_keys);
       // perform integrate
       std::string sst_files_dir_ = FLAGS_db + "/external_sst_file_basic_test/";
       FLAGS_env->DeleteDir(sst_files_dir_);
@@ -4265,50 +4284,55 @@ class Benchmark {
 
       std::vector<std::string> files;
       // generate file first
-      int FLAGS_max_file_num = 10;
-      int FLAGS_distinct_num =
-          FLAGS_write_buffer_size * FLAGS_max_file_num + 10;
       std::unique_ptr<const char[]> key_guard;
       Slice key = AllocateKey(&key_guard);
       std::string value("v", FLAGS_value_size);
       int rand_key = 0;
-      for (int file_id = 0; file_id < FLAGS_max_file_num; file_id++) {
-        std::string file_path = sst_files_dir_ + ToString(file_id) + ".sst";
-        SstFileWriter sst_file_writer(EnvOptions(), open_options_);
-        Status s = sst_file_writer.Open(file_path);
+
+      int file_id = 0;
+
+      std::string file_path = sst_files_dir_ + ToString(file_id) + ".sst";
+      SstFileWriter sst_file_writer(EnvOptions(), open_options_);
+      Status s = sst_file_writer.Open(file_path);
+      int size = 0;
+      for (int i = FLAGS_migrate_from; i < max_migrate_keys;
+           i += FLAGS_migrate_range / FLAGS_migrate_keys) {
+        if (size > FLAGS_write_buffer_size) {
+          sst_file_writer.Finish();
+          files.push_back(file_path);
+          file_id++;
+          file_path = sst_files_dir_ + ToString(file_id) + ".sst";
+          s = sst_file_writer.Open(file_path);
+          size = 0;
+        }
+        int64_t key_value = key_gen.GenerateKeys(i);
+        GenerateKeyFromInt(key_value, FLAGS_num, &key);
+        ValueType value_type = kTypeValue;  // after compaction
+        s = sst_file_writer.Put(key, value);
+        size += FLAGS_key_size + FLAGS_value_size;
         if (!s.ok()) {
           std::cout << s.ToString() << std::endl;
+          sst_file_writer.Finish();
           exit(-1);
         }
-
-        uint64_t start_key = file_id * FLAGS_write_buffer_size /
-                             (FLAGS_key_size + FLAGS_value_size);
-        for (auto i = 0;
-             i < FLAGS_write_buffer_size / (FLAGS_key_size + FLAGS_value_size);
-             i++) {
-          int64_t key_value = key_gen.GenerateKeys(i + start_key);
-          if (key_value >= max_migrate_keys) {
-            break;
-          }
-          GenerateKeyFromInt(key_value, FLAGS_num, &key);
-          ValueType value_type = kTypeValue;  // after compaction
-          s = sst_file_writer.Put(key, value);
-          if (!s.ok()) {
-            std::cout << s.ToString() << std::endl;
-            sst_file_writer.Finish();
-            exit(-1);
-          }
-        }
-        if (s.ok()) {
-          sst_file_writer.Finish();
-        }
-        files.push_back(file_path);
       }
 
+      if (s.ok()) {
+        sst_file_writer.Finish();
+      }
+      files.push_back(file_path);
+
+      std::cout << "start ingestion" << std::endl;
+      uint64_t start = FLAGS_env->NowMicros();
       IngestExternalFileOptions ingest_opts;
       ingest_opts.move_files = FLAGS_move_files;
-
+      uint64_t end = FLAGS_env->NowMicros();
       db_.db->IngestExternalFile(files, ingest_opts);
+      std::cout << "end ingestion, time taken:" << (end - start) / 1000000
+                << std::endl;
+      FLAGS_keyrange_start = FLAGS_migrate_from;
+      FLAGS_keyrange_num++;
+      RangedRunner(thread);
     }
   }
 

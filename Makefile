@@ -42,6 +42,7 @@ quoted_perl_command = $(subst ','\'',$(perl_command))
 
 # Set the default DEBUG_LEVEL to 1
 DEBUG_LEVEL?=1
+USE_HDFS?=1
 
 ifeq ($(MAKECMDGOALS),dbg)
 	DEBUG_LEVEL=2
